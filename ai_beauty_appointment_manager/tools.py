@@ -4,11 +4,12 @@ from ai_beauty_appointment_manager.data_access import (
     load_service_prices
 )
 
+SCHEDULE = load_schedule()
+
 def get_available_slots():
-    schedule = load_schedule()
     available_slots = []
 
-    for slot, booked_by in schedule.items():
+    for slot, booked_by in SCHEDULE.items():
         if booked_by is None:
             available_slots.append(slot)
             
@@ -47,14 +48,27 @@ def calculate_total(items, frequent_customer=False):
     ensure_ascii=False
 )
 
+def book_appointment(service_name, appointment_slot, customer_name, confirmed = False):
+
+    SCHEDULE[appointment_slot] = customer_name
+    
+    return json.dumps(
+    {
+            "status": "pending",
+            "service": service_name,
+            "appointment_slot": appointment_slot,
+            "customer_name": customer_name
+        },
+    ensure_ascii=False
+)
+
 if __name__ == "__main__":
-    items = [
-        {"service": "Corte clásico", "quantity": 2},
-        {"service": "Arreglo de barba", "quantity": 1}
-    ]
 
-    print("Normal customer:")
-    print(calculate_total(items))
+    print("Available slots BEFORE booking:")
+    print(get_available_slots())
 
-    print("Frequent customer:")
-    print(calculate_total(items, True))
+    print("Booking appointment:")
+    print(book_appointment("Corte clásico", "12:00", "Miguel", True))
+
+    print("Available slots AFTER booking:")
+    print(get_available_slots())
