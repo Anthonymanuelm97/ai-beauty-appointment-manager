@@ -1,10 +1,18 @@
 import json
-from ai_beauty_appointment_manager.data_access import (
-    load_schedule,
-    load_service_prices
-)
+from ai_beauty_appointment_manager.data_access import load_schedule, load_service_prices
 
 SCHEDULE = load_schedule()
+
+
+def error_response(code, message):
+    return json.dumps(
+        {
+            "error": message,
+            "error_code": code,
+        },
+        ensure_ascii=False,
+    )
+
 
 def get_available_slots():
     available_slots = []
@@ -12,63 +20,151 @@ def get_available_slots():
     for slot, booked_by in SCHEDULE.items():
         if booked_by is None:
             available_slots.append(slot)
-            
-    return json.dumps(
-    {"available_slots": available_slots},
-    ensure_ascii=False
-)
+
+    return json.dumps({"available_slots": available_slots}, ensure_ascii=False)
+
 
 def calculate_total(items, frequent_customer=False):
+
+    if type(items) is not list or not items:
+        return json.dumps(
+            {"error": "Items must be a non-empty list."},
+            ensure_ascii=False,
+        )
+
     prices = load_service_prices()
     subtotal = 0
     details = []
 
     for item in items:
-        service = item["service"]
-        quantity = item["quantity"]
-            
-        if service in prices:
-            line_total = prices[service] * quantity
-            subtotal += line_total
-            details.append({"service": service, "quantity": quantity, "total": line_total})
 
+        if type(item) is not dict:
+            return json.dumps(
+                {"error": "Each item must be a dictionary."},
+                ensure_ascii=False,
+            )
+
+        service = item.get("service")
+        quantity = item.get("quantity")
+
+        if type(service) is not str or not service.strip():
+            return json.dumps(
+                {"error": "Service name must be a non-empty string."},
+                ensure_ascii=False,
+            )
+
+        if type(quantity) is not int or quantity <= 0:
+            return json.dumps(
+                {"error": "Quantity must be a positive integer."},
+                ensure_ascii=False,
+            )
+
+        if service not in prices:
+            return json.dumps(
+                {"error": "The selected service does not exist."},
+                ensure_ascii=False,
+            )
+
+        line_total = prices[service] * quantity
+        subtotal += line_total
+        details.append({"service": service, "quantity": quantity, "total": line_total})
+
+    
+    if type(frequent_customer) is not bool:
+        return json.dumps(
+            {"error": "Frequent customer flag must be a boolean."},
+            ensure_ascii=False,
+        )
+    
     discount = 0
+
     if frequent_customer:
         discount = round(subtotal * 0.10)
 
     total = subtotal - discount
 
-    return json.dumps(
-    {
-        "details": details,
-        "subtotal": subtotal,
-        "discount": discount,
-        "total": total
-    },
-    ensure_ascii=False
-)
 
-def book_appointment(service_name, appointment_slot, customer_name, confirmed = False):
+    return json.dumps(
+        {
+            "details": details,
+            "subtotal": subtotal,
+            "discount": discount,
+            "total": total,
+        },
+        ensure_ascii=False,
+    )
+
+
+def book_appointment(service_name, appointment_slot, customer_name, confirmed=False):
+
+    prices = load_service_prices()
+
+    if type(customer_name) is not str or not customer_name.strip():
+        return json.dumps(
+            {"error": "Customer name must be a non-empty string."},
+            ensure_ascii=False,
+        )
+
+    if type(service_name) is not str or not service_name.strip():
+        return json.dumps(
+            {"error": "Service name must be a non-empty string."},
+            ensure_ascii=False,
+        )
+
+    if service_name not in prices:
+        return json.dumps(
+            {"error": "The selected service does not exist."},
+            ensure_ascii=False,
+        )
+
+    if confirmed is not True:
+        return json.dumps(
+            {"error": "Client must confirm the appointment first."},
+            ensure_ascii=False,
+        )
+
+    if type(appointment_slot) is not str or not appointment_slot.strip():
+        return json.dumps(
+            {"error": "Appointment slot must be a non-empty string."},
+            ensure_ascii=False,
+        )
+
+    if appointment_slot not in SCHEDULE:
+        return json.dumps(
+            {"error": "The selected appointment slot does not exist."},
+            ensure_ascii=False,
+        )
+
+    if SCHEDULE[appointment_slot] is not None:
+        return json.dumps(
+            {"error": "The selected appointment slot is already booked."},
+            ensure_ascii=False,
+        )
 
     SCHEDULE[appointment_slot] = customer_name
-    
+
     return json.dumps(
-    {
+        {
             "status": "pending",
             "service": service_name,
             "appointment_slot": appointment_slot,
-            "customer_name": customer_name
+            "customer_name": customer_name,
         },
-    ensure_ascii=False
-)
+        ensure_ascii=False,
+    )
+
 
 if __name__ == "__main__":
 
-    print("Available slots BEFORE booking:")
-    print(get_available_slots())
+    items = [
+        {"service": "Corte clásico", "quantity": 2}
+    ]
 
-    print("Booking appointment:")
-    print(book_appointment("Corte clásico", "12:00", "Miguel", True))
+    print("Normal customer:")
+    print(calculate_total(items, False))
 
-    print("Available slots AFTER booking:")
-    print(get_available_slots())
+    print("Frequent customer:")
+    print(calculate_total(items, True))
+
+    print("Invalid frequent customer:")
+    print(calculate_total(items, "False"))
