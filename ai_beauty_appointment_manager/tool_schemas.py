@@ -51,7 +51,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "book_appointment",
-            "description": "Create a pending appointment request after explicit customer confirmation.",
+            "description": "Validate a proposed appointment without changing the schedule. Python registers it only after explicit customer confirmation.",
             "parameters": {
                 "type": "object",
                 "properties": {

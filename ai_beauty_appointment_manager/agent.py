@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
@@ -11,6 +12,7 @@ from groq import Groq
 from ai_beauty_appointment_manager.system_prompts import SYSTEM_PROMPT
 from ai_beauty_appointment_manager.tool_dispatcher import dispatch_tool
 from ai_beauty_appointment_manager.tool_schemas import TOOLS
+from ai_beauty_appointment_manager.tools import _validate_booking_proposal
 
 
 class Agent:
@@ -83,26 +85,34 @@ class Agent:
         return payload
 
     def _normalize_confirmation_text(self, text: str) -> str:
-        cleaned = text.casefold()
-        return " ".join(re.findall(r"[a-záéíóúüñ]+", cleaned))
+        normalized = unicodedata.normalize("NFKD", text.casefold())
+        normalized = "".join(
+            character
+            for character in normalized
+            if not unicodedata.combining(character)
+        )
+        return " ".join(re.findall(r"[a-záéíóúüñ]+", normalized))
 
     def _is_affirmative(self, text: str) -> bool:
         normalized = self._normalize_confirmation_text(text)
         affirmative_values = {
             "si",
-            "sí",
             "confirmo",
             "confirmado",
+            "correcto",
             "ok",
             "vale",
             "listo",
             "adelante",
             "acepto",
+            "si confirmo",
+            "si confirmo la solicitud",
+            "si acepto",
+            "correcto confirmo",
+            "de acuerdo",
+            "claro",
         }
-        if not normalized:
-            return False
-        first_word = normalized.split()[0]
-        return normalized in affirmative_values or first_word in affirmative_values
+        return normalized in affirmative_values
 
     def _is_negative(self, text: str) -> bool:
         normalized = self._normalize_confirmation_text(text)
@@ -153,51 +163,49 @@ class Agent:
 
     def _prepare_pending_booking_from_message(self, message: str) -> Optional[Dict[str, str]]:
         from ai_beauty_appointment_manager.data_access import load_service_prices
-        from ai_beauty_appointment_manager.tools import SCHEDULE
 
         if not message:
             return None
 
-        normalized_message = " ".join(message.casefold().split())
+        normalized_message = self._normalize_confirmation_text(message)
         service_catalog = load_service_prices()
         service_name = None
         for candidate in service_catalog:
-            normalized_candidate = " ".join(candidate.casefold().split())
-            if normalized_candidate in normalized_message:
+            normalized_candidate = self._normalize_confirmation_text(candidate)
+            if re.search(
+                rf"(?<!\w){re.escape(normalized_candidate)}(?!\w)",
+                normalized_message,
+            ):
                 service_name = candidate
                 break
 
         if service_name is None:
             return None
 
-        slot_match = None
         time_match = re.search(r"\b(\d{1,2}):(\d{2})\b", message)
-        if time_match:
-            hour = int(time_match.group(1))
-            minute = time_match.group(2)
-            normalized_slot = f"{hour:02d}:{minute}"
-            if normalized_slot in SCHEDULE and SCHEDULE.get(normalized_slot) is None:
-                slot_match = normalized_slot
-
-        if slot_match is None:
+        if time_match is None:
             return None
 
-        customer_name = None
-        for pattern in ("a nombre de ", "para ", "por "):
-            if pattern in message.casefold():
-                remainder = message.split(pattern, 1)[1].strip()
-                customer_name = remainder.strip(".,;:!? ")
-                if customer_name:
-                    break
-
-        if not customer_name:
+        hour = int(time_match.group(1))
+        appointment_slot = f"{hour:02d}:{time_match.group(2)}"
+        name_match = re.search(
+            r"\b(?:a nombre de|para)\s+([^,.;!?]+)",
+            message,
+            flags=re.IGNORECASE,
+        )
+        if name_match is None:
             return None
 
-        return {
-            "service_name": service_name,
-            "appointment_slot": slot_match,
-            "customer_name": customer_name,
-        }
+        customer_name = name_match.group(1).strip()
+        if re.fullmatch(r"(?:las?\s+)?\d{1,2}(?::\d{2})?", customer_name, re.IGNORECASE):
+            return None
+
+        proposal, error = _validate_booking_proposal(
+            service_name,
+            appointment_slot,
+            customer_name,
+        )
+        return proposal if error is None else None
 
     def _call_model(self):
         response = self.client.chat.completions.create(
@@ -215,18 +223,10 @@ class Agent:
                     getattr(usage, "completion_tokens", "unknown"),
                 )
             )
+        if self.diagnostic and getattr(response, "choices", None):
+            print("[finish_reason]", getattr(response.choices[0], "finish_reason", None))
 
         return response
-
-    def _matches_pending_booking(self, booking_details: Dict[str, Any]) -> bool:
-        if self.pending_booking is None:
-            return False
-
-        for field in ("service_name", "appointment_slot", "customer_name"):
-            if str(self.pending_booking.get(field, "")).strip() != str(booking_details.get(field, "")).strip():
-                return False
-
-        return bool(booking_details.get("confirmed", False)) is True
 
     def _execute_tool_call(self, tool_call: Any) -> str:
         tool_name = tool_call.function.name
@@ -236,46 +236,63 @@ class Agent:
             try:
                 arguments = json.loads(arguments_json)
             except json.JSONDecodeError:
-                arguments = {}
+                return json.dumps({"error": "Invalid JSON arguments."}, ensure_ascii=False)
 
             if not isinstance(arguments, dict):
-                arguments = {}
+                return json.dumps(
+                    {"error": "Tool arguments must be a JSON object."},
+                    ensure_ascii=False,
+                )
 
-            service_name = arguments.get("service_name")
-            appointment_slot = arguments.get("appointment_slot")
-            customer_name = arguments.get("customer_name")
             confirmed = arguments.get("confirmed", False)
-
-            if bool(confirmed) is True:
-                if not self._matches_pending_booking(arguments):
-                    return json.dumps(
-                        {
-                            "error": "Booking requires explicit customer confirmation for the exact pending details.",
-                            "requires_confirmation": True,
-                            "service_name": str(service_name or ""),
-                            "appointment_slot": str(appointment_slot or ""),
-                            "customer_name": str(customer_name or ""),
-                        },
-                        ensure_ascii=False,
-                    )
-
-            if bool(confirmed) is not True:
-                self.pending_booking = {
-                    "service_name": str(service_name or ""),
-                    "appointment_slot": str(appointment_slot or ""),
-                    "customer_name": str(customer_name or ""),
-                }
+            if confirmed is True:
                 return json.dumps(
                     {
+                        "error": "Booking requires explicit customer confirmation for the exact pending details.",
                         "requires_confirmation": True,
-                        "service_name": str(service_name or ""),
-                        "appointment_slot": str(appointment_slot or ""),
-                        "customer_name": str(customer_name or ""),
                     },
                     ensure_ascii=False,
                 )
 
+            if confirmed is not False:
+                return json.dumps(
+                    {"error": "Booking proposal must use confirmed=false."},
+                    ensure_ascii=False,
+                )
+
+            proposal, error = _validate_booking_proposal(
+                arguments.get("service_name"),
+                arguments.get("appointment_slot"),
+                arguments.get("customer_name"),
+            )
+            if error is not None:
+                return json.dumps(error, ensure_ascii=False)
+
+            self.pending_booking = proposal
+            return json.dumps(
+                {"requires_confirmation": True, **proposal},
+                ensure_ascii=False,
+            )
+
         return dispatch_tool(tool_name, arguments_json)
+
+    def _is_unusable_response(self, content: Any) -> bool:
+        if not isinstance(content, str) or not content.strip():
+            return True
+
+        return bool(
+            re.search(
+                r"\b([^\W\d_]+)\s+\1\s+[^\W\d_]{1,2}(?:…|\.{3})",
+                content,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    def _looks_like_confirmation_request(self, content: str) -> bool:
+        normalized = self._normalize_confirmation_text(content)
+        return "confirm" in normalized and (
+            "si" in normalized or "solicitud" in normalized
+        )
 
     def respond(self, message: str) -> str:
         if message is None:
@@ -331,6 +348,8 @@ class Agent:
                 self.messages.append({"role": "assistant", "content": answer})
                 return answer
 
+            self.pending_booking = None
+
         prepared_booking = self._prepare_pending_booking_from_message(cleaned)
         if prepared_booking is not None:
             self.pending_booking = prepared_booking
@@ -346,15 +365,34 @@ class Agent:
         response = self._call_model()
         rounds = 0
 
-        while getattr(response.choices[0].message, "tool_calls", None) and rounds < self.max_tool_rounds:
+        while True:
+            choices = getattr(response, "choices", None)
+            if not choices:
+                answer = "No pude generar una respuesta clara en este momento. Inténtalo de nuevo."
+                self.messages.append({"role": "assistant", "content": answer})
+                return answer
+
+            choice = choices[0]
+            model_message = choice.message
+            tool_calls = getattr(model_message, "tool_calls", None)
+            if not tool_calls:
+                break
+
+            if rounds >= self.max_tool_rounds:
+                if self.diagnostic:
+                    print("[tool] model exceeded the tool-call limit")
+                answer = "No pude completar esta consulta. Inténtalo de nuevo."
+                self.messages.append({"role": "assistant", "content": answer})
+                return answer
+
             rounds += 1
-            assistant_message = self._message_to_dict(response.choices[0].message)
+            assistant_message = self._message_to_dict(model_message)
             self.messages.append(assistant_message)
 
             if self.diagnostic:
                 print("[tool]", assistant_message.get("tool_calls"))
 
-            for tool_call in response.choices[0].message.tool_calls:
+            for tool_call in tool_calls:
                 result = self._execute_tool_call(tool_call)
                 if self.diagnostic:
                     print(
@@ -373,40 +411,27 @@ class Agent:
                     }
                 )
 
-                try:
-                    payload = json.loads(result)
-                except json.JSONDecodeError:
-                    payload = {}
-
-                if isinstance(payload, dict) and payload.get("requires_confirmation"):
-                    self.pending_booking = {
-                        "service_name": str(payload.get("service_name", "")),
-                        "appointment_slot": str(payload.get("appointment_slot", "")),
-                        "customer_name": str(payload.get("customer_name", "")),
-                    }
-
             response = self._call_model()
 
-        final_message = response.choices[0].message
-        if final_message.tool_calls:
-            self.messages.append(self._message_to_dict(final_message))
-            if self.diagnostic:
-                print("[tool] model exceeded the tool-call limit")
-            return "No pude completar esta consulta. Inténtalo de nuevo."
+        final_message = choice.message
+        if self.pending_booking is not None:
+            answer = self._build_confirmation_prompt(self.pending_booking)
+        else:
+            finish_reason = getattr(choice, "finish_reason", None)
+            content = getattr(final_message, "content", None)
+            if (
+                finish_reason == "length"
+                or self._is_unusable_response(content)
+                or self._looks_like_confirmation_request(content)
+            ):
+                answer = "No pude generar una respuesta clara en este momento. Inténtalo de nuevo."
+            else:
+                answer = content.replace("**", "").strip()
 
-        self.messages.append(self._message_to_dict(final_message))
-
-        answer = final_message.content or "No pude generar una respuesta."
-        cleaned_answer = answer.replace("**", "").strip()
-
-        if self.pending_booking and "sí" not in cleaned_answer.casefold():
-            confirmation_prompt = self._build_confirmation_prompt(self.pending_booking)
-            if self.diagnostic:
-                print("[history]", self.role_sequence())
-            return confirmation_prompt
+        self.messages.append({"role": "assistant", "content": answer})
 
         if self.diagnostic:
             print("[final state]", json.dumps(self.get_final_state(), ensure_ascii=False))
             print("[history]", self.role_sequence())
 
-        return cleaned_answer
+        return answer

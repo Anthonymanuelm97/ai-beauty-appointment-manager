@@ -47,6 +47,53 @@ def error_response(code, message):
     )
 
 
+def _validate_booking_proposal(service_name, appointment_slot, customer_name):
+    prices = load_service_prices()
+
+    if type(customer_name) is not str or not customer_name.strip():
+        return None, {
+            "error": "Customer name must be a non-empty string.",
+            "error_code": "invalid_customer_name",
+        }
+
+    if type(service_name) is not str or not service_name.strip():
+        return None, {
+            "error": "Service name must be a non-empty string.",
+            "error_code": "invalid_service_name",
+        }
+
+    service_name = _resolve_service_name(service_name, prices)
+    if service_name is None:
+        return None, {
+            "error": "The selected service does not exist.",
+            "error_code": "unknown_service",
+        }
+
+    if type(appointment_slot) is not str or not appointment_slot.strip():
+        return None, {
+            "error": "Appointment slot must be a non-empty string.",
+            "error_code": "invalid_appointment_slot",
+        }
+
+    if appointment_slot not in SCHEDULE:
+        return None, {
+            "error": "The selected appointment slot does not exist.",
+            "error_code": "unknown_appointment_slot",
+        }
+
+    if SCHEDULE[appointment_slot] is not None:
+        return None, {
+            "error": "The selected appointment slot is already booked.",
+            "error_code": "occupied_appointment_slot",
+        }
+
+    return {
+        "service_name": service_name,
+        "appointment_slot": appointment_slot,
+        "customer_name": customer_name.strip(),
+    }, None
+
+
 def get_available_slots():
     available_slots = []
 
@@ -136,27 +183,13 @@ def calculate_total(items, frequent_customer=False):
 
 
 def book_appointment(service_name, appointment_slot, customer_name, confirmed=False):
-
-    prices = load_service_prices()
-
-    if type(customer_name) is not str or not customer_name.strip():
-        return json.dumps(
-            {"error": "Customer name must be a non-empty string."},
-            ensure_ascii=False,
-        )
-
-    if type(service_name) is not str or not service_name.strip():
-        return json.dumps(
-            {"error": "Service name must be a non-empty string."},
-            ensure_ascii=False,
-        )
-
-    service_name = _resolve_service_name(service_name, prices)
-    if service_name is None:
-        return json.dumps(
-            {"error": "The selected service does not exist."},
-            ensure_ascii=False,
-        )
+    proposal, error = _validate_booking_proposal(
+        service_name,
+        appointment_slot,
+        customer_name,
+    )
+    if error is not None:
+        return json.dumps(error, ensure_ascii=False)
 
     if confirmed is not True:
         return json.dumps(
@@ -164,33 +197,14 @@ def book_appointment(service_name, appointment_slot, customer_name, confirmed=Fa
             ensure_ascii=False,
         )
 
-    if type(appointment_slot) is not str or not appointment_slot.strip():
-        return json.dumps(
-            {"error": "Appointment slot must be a non-empty string."},
-            ensure_ascii=False,
-        )
-
-    if appointment_slot not in SCHEDULE:
-        return json.dumps(
-            {"error": "The selected appointment slot does not exist."},
-            ensure_ascii=False,
-        )
-
-    if SCHEDULE[appointment_slot] is not None:
-        return json.dumps(
-            {"error": "The selected appointment slot is already booked."},
-            ensure_ascii=False,
-        )
-
-    customer_name = customer_name.strip()
-    SCHEDULE[appointment_slot] = customer_name
+    SCHEDULE[proposal["appointment_slot"]] = proposal["customer_name"]
 
     return json.dumps(
         {
             "status": "pending",
-            "service": service_name,
-            "appointment_slot": appointment_slot,
-            "customer_name": customer_name,
+            "service": proposal["service_name"],
+            "appointment_slot": proposal["appointment_slot"],
+            "customer_name": proposal["customer_name"],
         },
         ensure_ascii=False,
     )
