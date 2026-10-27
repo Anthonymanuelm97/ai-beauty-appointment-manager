@@ -1,7 +1,40 @@
 import json
+import unicodedata
+
 from ai_beauty_appointment_manager.data_access import load_schedule, load_service_prices
 
 SCHEDULE = load_schedule()
+
+
+def _normalize_service_name(service_name):
+    if not isinstance(service_name, str):
+        return ""
+
+    normalized = unicodedata.normalize("NFKD", service_name.strip())
+    normalized = "".join(
+        character for character in normalized if not unicodedata.combining(character)
+    )
+    normalized = " ".join(normalized.split())
+    return normalized.casefold()
+
+
+def _resolve_service_name(service_name, prices):
+    if not isinstance(service_name, str):
+        return None
+
+    candidate = _normalize_service_name(service_name)
+    if not candidate:
+        return None
+
+    matches = []
+    for official_name in prices:
+        if _normalize_service_name(official_name) == candidate:
+            matches.append(official_name)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
 
 
 def error_response(code, message):
@@ -50,6 +83,13 @@ def calculate_total(items, frequent_customer=False):
         if type(service) is not str or not service.strip():
             return json.dumps(
                 {"error": "Service name must be a non-empty string."},
+                ensure_ascii=False,
+            )
+
+        service = _resolve_service_name(service, prices)
+        if service is None:
+            return json.dumps(
+                {"error": "The selected service does not exist."},
                 ensure_ascii=False,
             )
 
@@ -111,7 +151,8 @@ def book_appointment(service_name, appointment_slot, customer_name, confirmed=Fa
             ensure_ascii=False,
         )
 
-    if service_name not in prices:
+    service_name = _resolve_service_name(service_name, prices)
+    if service_name is None:
         return json.dumps(
             {"error": "The selected service does not exist."},
             ensure_ascii=False,
@@ -141,6 +182,7 @@ def book_appointment(service_name, appointment_slot, customer_name, confirmed=Fa
             ensure_ascii=False,
         )
 
+    customer_name = customer_name.strip()
     SCHEDULE[appointment_slot] = customer_name
 
     return json.dumps(

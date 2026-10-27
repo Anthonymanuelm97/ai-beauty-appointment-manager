@@ -1,3 +1,7 @@
+from ai_beauty_appointment_manager.data_access import load_service_prices
+
+SERVICE_NAMES = list(load_service_prices().keys())
+
 TOOLS = [
     {
         "type": "function",
@@ -24,8 +28,15 @@ TOOLS = [
                         "items": {
                             "type": "object",
                             "properties": {
-                                "service": {"type": "string"},
-                                "quantity": {"type": "integer"},
+                                "service": {
+                                    "type": "string",
+                                    "description": "Official service name from the business catalog.",
+                                    "enum": SERVICE_NAMES,
+                                },
+                                "quantity": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                },
                             },
                             "required": ["service", "quantity"],
                         },
@@ -37,28 +48,31 @@ TOOLS = [
         },
     },
     {
-    "type": "function",
-    "function": {
-        "name": "book_appointment",
-        "description": "Create a pending appointment request after explicit customer confirmation.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "service_name": {"type": "string"},
-                "appointment_slot": {"type": "string"},
-                "customer_name": {"type": "string"},
-                "confirmed": {"type": "boolean"},
+        "type": "function",
+        "function": {
+            "name": "book_appointment",
+            "description": "Create a pending appointment request after explicit customer confirmation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service_name": {
+                        "type": "string",
+                        "description": "Official service name from the business catalog.",
+                        "enum": SERVICE_NAMES,
+                    },
+                    "appointment_slot": {"type": "string"},
+                    "customer_name": {"type": "string"},
+                    "confirmed": {"type": "boolean"},
+                },
+                "required": ["service_name", "appointment_slot", "customer_name", "confirmed"],
             },
-            "required": ["service_name", "appointment_slot", "customer_name", "confirmed"],
         },
     },
-}
 ]
 
 if __name__ == "__main__":
     for tool in TOOLS:
         function = tool["function"]
-
         print(function["name"])
         print("Required:", function["parameters"]["required"])
         print()
